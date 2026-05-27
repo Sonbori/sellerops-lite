@@ -231,7 +231,19 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(createAiSummaryPayload(dashboard)),
       })
-      const data = (await response.json()) as { summary?: string; error?: string }
+      const responseText = await response.text()
+      let data: { summary?: string; error?: string } = {}
+
+      try {
+        data = responseText ? (JSON.parse(responseText) as { summary?: string; error?: string }) : {}
+      } catch {
+        data = {
+          error:
+            response.status === 404
+              ? '현재 서버에서 /api/summary를 찾을 수 없습니다. 로컬에서는 vercel dev로 실행해야 합니다.'
+              : responseText || '서버가 JSON이 아닌 오류 응답을 반환했습니다.',
+        }
+      }
 
       if (!response.ok || !data.summary) {
         throw new Error(data.error ?? 'AI 요약을 생성하지 못했습니다.')

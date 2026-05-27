@@ -2,10 +2,6 @@ import OpenAI from 'openai'
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { aiSummaryRequestSchema } from '../src/lib/aiSummary'
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
-
 export default async function handler(request: VercelRequest, response: VercelResponse) {
   if (request.method !== 'POST') {
     response.setHeader('Allow', 'POST')
@@ -15,6 +11,10 @@ export default async function handler(request: VercelRequest, response: VercelRe
   if (!process.env.OPENAI_API_KEY) {
     return response.status(503).json({ error: 'OPENAI_API_KEY 환경변수가 설정되지 않았습니다.' })
   }
+
+  const client = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  })
 
   const parsed = aiSummaryRequestSchema.safeParse(request.body)
 
@@ -47,4 +47,3 @@ export default async function handler(request: VercelRequest, response: VercelRe
     })
   }
 }
-
