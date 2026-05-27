@@ -1,6 +1,40 @@
 import OpenAI from 'openai'
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { aiSummaryRequestSchema } from '../src/lib/aiSummary'
+import { z } from 'zod'
+
+const aiSummaryRequestSchema = z.object({
+  summary: z.object({
+    totalRevenue: z.number(),
+    totalProfit: z.number(),
+    averageMarginRate: z.number(),
+    riskProductCount: z.number(),
+  }),
+  priorityProducts: z
+    .array(
+      z.object({
+        productName: z.string(),
+        category: z.string(),
+        grossSales: z.number(),
+        netProfit: z.number(),
+        marginRate: z.number(),
+        breakEvenPrice: z.number(),
+        adCostRate: z.number(),
+        stock: z.number(),
+        riskLevel: z.enum(['high', 'medium', 'low']),
+        riskReasons: z.array(z.string()),
+      }),
+    )
+    .max(5),
+  categoryProfit: z
+    .array(
+      z.object({
+        category: z.string(),
+        grossSales: z.number(),
+        netProfit: z.number(),
+      }),
+    )
+    .max(8),
+})
 
 export default async function handler(request: VercelRequest, response: VercelResponse) {
   if (request.method !== 'POST') {
