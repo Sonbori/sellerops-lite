@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import Papa from 'papaparse'
 import {
   AlertTriangle,
@@ -35,6 +36,7 @@ import {
 } from './lib/sellerops'
 import type { ProductMetrics, RiskLevel, ValidationIssue, VatMode } from './lib/sellerops'
 import { createAiSummaryPayload } from './lib/aiSummary'
+import type { AiChatMessage } from './lib/aiSummary'
 
 type RiskFilter = 'all' | RiskLevel
 type AiStatus = 'idle' | 'loading' | 'done' | 'error'
@@ -82,7 +84,8 @@ function App() {
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('all')
   const [vatMode, setVatMode] = useState<VatMode>('ignored')
   const [aiStatus, setAiStatus] = useState<AiStatus>('idle')
-  const [aiSummary, setAiSummary] = useState('')
+  const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([])
+  const [aiQuestion, setAiQuestion] = useState('')
 
   const loadSampleCsv = async () => {
     const response = await fetch('/sample-orders.csv')
@@ -119,7 +122,8 @@ function App() {
 
   useEffect(() => {
     setAiStatus('idle')
-    setAiSummary('')
+    setAiMessages([])
+    setAiQuestion('')
   }, [csvText, vatMode])
 
   const categories = useMemo(() => {
@@ -217,19 +221,31 @@ function App() {
     setCsvText(await file.text())
   }
 
-  const requestAiSummary = async () => {
+  const requestAiSummary = async (question?: string) => {
     if (!dashboard) {
       return
     }
 
+    const trimmedQuestion = question?.trim()
+    const nextMessages: AiChatMessage[] = trimmedQuestion
+      ? [...aiMessages.slice(-7), { role: 'user', content: trimmedQuestion }]
+      : aiMessages.slice(-8)
+
     setAiStatus('loading')
-    setAiSummary('')
+    setAiQuestion('')
+    if (trimmedQuestion) {
+      setAiMessages(nextMessages)
+    }
 
     try {
       const response = await fetch('/api/summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createAiSummaryPayload(dashboard)),
+        body: JSON.stringify({
+          ...createAiSummaryPayload(dashboard),
+          question: trimmedQuestion,
+          messages: nextMessages,
+        }),
       })
       const responseText = await response.text()
       let data: { summary?: string; error?: string } = {}
@@ -249,11 +265,19 @@ function App() {
         throw new Error(data.error ?? 'AI 요약을 생성하지 못했습니다.')
       }
 
-      setAiSummary(data.summary)
+      setAiMessages([...nextMessages, { role: 'assistant', content: data.summary }])
       setAiStatus('done')
     } catch (error) {
-      setAiSummary(error instanceof Error ? error.message : 'AI 요약을 생성하지 못했습니다.')
+      const message = error instanceof Error ? error.message : 'AI 요약을 생성하지 못했습니다.'
+      setAiMessages([...nextMessages, { role: 'assistant', content: message }])
       setAiStatus('error')
+    }
+  }
+
+  const handleAiQuestionSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (aiQuestion.trim() && aiStatus !== 'loading') {
+      void requestAiSummary(aiQuestion)
     }
   }
 
@@ -624,16 +648,32 @@ function App() {
                   {aiStatus === 'loading' ? '요약 생성 중' : 'AI 요약 생성'}
                 </button>
               </div>
-              {aiSummary ? (
-                <div
-                  className={clsx(
-                    'mt-4 whitespace-pre-wrap rounded-lg border p-4 text-sm leading-6',
-                    aiStatus === 'error'
-                      ? 'border-amber-200 bg-amber-50 text-amber-900'
-                      : 'border-emerald-200 bg-emerald-50 text-emerald-950',
-                  )}
-                >
-                  {aiSummary}
+              {aiMessages.length ? (
+                <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
+                    {aiMessages.map((message, index) => (
+                      <div
+                        key={`${message.role}-${index}`}
+                        className={clsx(
+                          'whitespace-pre-wrap rounded-lg border p-4 text-sm leading-6',
+                          message.role === 'user' &&
+                            'ml-auto max-w-3xl border-slate-300 bg-white text-slate-900',
+                          message.role === 'assistant' &&
+                            aiStatus === 'error' &&
+                            index === aiMessages.length - 1 &&
+                            'max-w-4xl border-amber-200 bg-amber-50 text-amber-900',
+                          message.role === 'assistant' &&
+                            !(aiStatus === 'error' && index === aiMessages.length - 1) &&
+                            'max-w-4xl border-emerald-200 bg-emerald-50 text-emerald-950',
+                        )}
+                      >
+                        <p className="mb-2 text-xs font-semibold text-slate-500">
+                          {message.role === 'user' ? '질문' : 'AI 답변'}
+                        </p>
+                        {message.content}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
@@ -641,6 +681,35 @@ function App() {
                   환경에서는 `OPENAI_API_KEY`를 서버 환경변수로 설정하세요.
                 </div>
               )}
+              <form
+                onSubmit={handleAiQuestionSubmit}
+                className="mt-4 rounded-lg border border-slate-300 bg-white p-3"
+              >
+                <label htmlFor="ai-question" className="sr-only">
+                  AI 후속 질문
+                </label>
+                <textarea
+                  id="ai-question"
+                  value={aiQuestion}
+                  onChange={(event) => setAiQuestion(event.target.value)}
+                  rows={3}
+                  placeholder="예: 어떤 상품부터 가격을 조정해야 해? 광고비를 줄일 상품만 알려줘."
+                  className="w-full resize-none border-0 bg-transparent text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
+                />
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs leading-5 text-slate-500">
+                    후속 질문도 원본 CSV가 아닌 계산 summary 기준으로만 답합니다.
+                  </p>
+                  <button
+                    type="submit"
+                    disabled={aiStatus === 'loading' || !aiQuestion.trim()}
+                    className="inline-flex w-fit items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    <Bot className="h-4 w-4" />
+                    질문 보내기
+                  </button>
+                </div>
+              </form>
             </section>
           </>
         )}

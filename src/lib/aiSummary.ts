@@ -33,9 +33,20 @@ export const aiSummaryRequestSchema = z.object({
       }),
     )
     .max(8),
+  question: z.string().trim().max(600).optional(),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(['user', 'assistant']),
+        content: z.string().max(3000),
+      }),
+    )
+    .max(8)
+    .optional(),
 })
 
 export type AiSummaryRequest = z.infer<typeof aiSummaryRequestSchema>
+export type AiChatMessage = NonNullable<AiSummaryRequest['messages']>[number]
 
 export function createAiSummaryPayload(dashboard: DashboardData): AiSummaryRequest {
   return {
@@ -55,4 +66,3 @@ export function createAiSummaryPayload(dashboard: DashboardData): AiSummaryReque
     categoryProfit: dashboard.categoryProfit.slice(0, 8),
   }
 }
-
