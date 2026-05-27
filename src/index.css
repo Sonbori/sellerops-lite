@@ -34,11 +34,8 @@ select {
   font: inherit;
 }
 
-p,
-span,
-li,
 h1,
 h2,
 h3 {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }

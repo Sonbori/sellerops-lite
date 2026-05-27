@@ -16,6 +16,11 @@ export const REQUIRED_COLUMNS = [
 
 export type RequiredColumn = (typeof REQUIRED_COLUMNS)[number]
 export type RiskLevel = 'high' | 'medium' | 'low'
+export type VatMode = 'ignored' | 'included'
+
+export interface CalculationOptions {
+  vatMode?: VatMode
+}
 
 export interface OrderRow {
   orderDate: string
@@ -56,6 +61,7 @@ export interface ProductMetrics {
   netProfit: number
   marginRate: number
   breakEvenPrice: number
+  adCostRate: number
   stock: number
   riskLevel: RiskLevel
   riskReasons: string[]
@@ -73,10 +79,42 @@ export interface DashboardData {
   summary: DashboardSummary
   categoryProfit: Array<{ category: string; grossSales: number; netProfit: number }>
   dailyTrend: Array<{ orderDate: string; grossSales: number; netProfit: number }>
+  priorityProducts: ProductMetrics[]
 }
 
-const nonNegativeNumber = z.coerce.number().finite().min(0)
-const nonNegativeInteger = z.coerce.number().int().min(0)
+const VAT_RATE = 0.1
+
+function normalizeNumberInput(value: unknown) {
+  if (typeof value === 'number') {
+    return value
+  }
+
+  if (typeof value !== 'string') {
+    return value
+  }
+
+  const normalized = value
+    .trim()
+    .replaceAll(',', '')
+    .replaceAll('원', '')
+    .replaceAll('%', '')
+    .replace(/\s/g, '')
+
+  return normalized === '' ? value : normalized
+}
+
+function normalizeRow(row: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(row).map(([key, value]) => [key.trim().replace(/^\uFEFF/, ''), normalizeNumberInput(value)]),
+  )
+}
+
+function normalizeFields(fields: string[]) {
+  return fields.map((field) => field.trim().replace(/^\uFEFF/, ''))
+}
+
+const nonNegativeNumber = z.preprocess(normalizeNumberInput, z.coerce.number().finite().min(0))
+const nonNegativeInteger = z.preprocess(normalizeNumberInput, z.coerce.number().int().min(0))
 
 const orderRowSchema = z.object({
   orderDate: z
@@ -85,10 +123,13 @@ const orderRowSchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD 형식이어야 합니다.'),
   productName: z.string().trim().min(1, '상품명은 필수입니다.'),
   category: z.string().trim().min(1, '카테고리는 필수입니다.'),
-  quantity: z.coerce.number().int().min(1, '수량은 1 이상 정수여야 합니다.'),
+  quantity: z.preprocess(
+    normalizeNumberInput,
+    z.coerce.number().int().min(1, '수량은 1 이상 정수여야 합니다.'),
+  ),
   unitPrice: nonNegativeNumber,
   productCost: nonNegativeNumber,
-  platformFeeRate: z.coerce.number().finite().min(0).max(99.9),
+  platformFeeRate: z.preprocess(normalizeNumberInput, z.coerce.number().finite().min(0).max(99.9)),
   shippingFee: nonNegativeNumber,
   adCost: nonNegativeNumber,
   discount: nonNegativeNumber,
@@ -106,7 +147,8 @@ function roundRate(value: number) {
 export function parseCsvRows(rows: Array<Record<string, unknown>>, fields: string[]): ParseCsvResult {
   const issues: ValidationIssue[] = []
   const validRows: OrderRow[] = []
-  const missingColumns = REQUIRED_COLUMNS.filter((column) => !fields.includes(column))
+  const normalizedFields = normalizeFields(fields)
+  const missingColumns = REQUIRED_COLUMNS.filter((column) => !normalizedFields.includes(column))
 
   for (const column of missingColumns) {
     issues.push({
@@ -120,7 +162,7 @@ export function parseCsvRows(rows: Array<Record<string, unknown>>, fields: strin
   }
 
   rows.forEach((row, index) => {
-    const result = orderRowSchema.safeParse(row)
+    const result = orderRowSchema.safeParse(normalizeRow(row))
 
     if (!result.success) {
       for (const issue of result.error.issues) {
@@ -139,17 +181,24 @@ export function parseCsvRows(rows: Array<Record<string, unknown>>, fields: strin
   return { validRows, issues }
 }
 
-export function calculateOrderMetrics(row: OrderRow) {
+function withoutIncludedVat(value: number, vatMode: VatMode) {
+  return vatMode === 'included' ? value / (1 + VAT_RATE) : value
+}
+
+export function calculateOrderMetrics(row: OrderRow, options: CalculationOptions = {}) {
+  const vatMode = options.vatMode ?? 'ignored'
   const grossSales = row.quantity * row.unitPrice
+  const netSales = withoutIncludedVat(grossSales, vatMode)
   const platformFee = grossSales * (row.platformFeeRate / 100)
-  const totalProductCost = row.quantity * row.productCost
+  const totalProductCost = withoutIncludedVat(row.quantity * row.productCost, vatMode)
   const totalVariableCost = totalProductCost + row.shippingFee + row.adCost + row.discount
   const totalCost = totalVariableCost + platformFee
-  const netProfit = grossSales - totalCost
+  const netProfit = netSales - totalCost
   const marginRate = grossSales === 0 ? 0 : (netProfit / grossSales) * 100
   const denominator = row.quantity * (1 - row.platformFeeRate / 100)
+  const breakEvenSupplyPrice = denominator <= 0 ? Number.POSITIVE_INFINITY : totalVariableCost / denominator
   const breakEvenPrice =
-    denominator <= 0 ? Number.POSITIVE_INFINITY : totalVariableCost / denominator
+    vatMode === 'included' ? breakEvenSupplyPrice * (1 + VAT_RATE) : breakEvenSupplyPrice
 
   return {
     grossSales,
@@ -159,6 +208,7 @@ export function calculateOrderMetrics(row: OrderRow) {
     netProfit,
     marginRate,
     breakEvenPrice,
+    adCostRate: grossSales === 0 ? 0 : (row.adCost / grossSales) * 100,
   }
 }
 
@@ -198,12 +248,12 @@ function classifyRisk(metrics: {
   return { riskLevel: 'low' as const, riskReasons: reasons.length ? reasons : ['안정 구간'] }
 }
 
-export function aggregateProducts(rows: OrderRow[]): ProductMetrics[] {
+export function aggregateProducts(rows: OrderRow[], options: CalculationOptions = {}): ProductMetrics[] {
   const productMap = new Map<string, ProductMetrics & { unitRevenue: number }>()
 
   for (const row of rows) {
     const key = `${row.productName}::${row.category}`
-    const orderMetrics = calculateOrderMetrics(row)
+    const orderMetrics = calculateOrderMetrics(row, options)
     const current =
       productMap.get(key) ??
       ({
@@ -220,6 +270,7 @@ export function aggregateProducts(rows: OrderRow[]): ProductMetrics[] {
         netProfit: 0,
         marginRate: 0,
         breakEvenPrice: 0,
+        adCostRate: 0,
         stock: row.stock,
         riskLevel: 'low',
         riskReasons: [],
@@ -247,9 +298,12 @@ export function aggregateProducts(rows: OrderRow[]): ProductMetrics[] {
       const totalVariableCost =
         product.totalProductCost + product.shippingFee + product.adCost + product.discount
       const denominator = product.quantity * (1 - feeRate)
-      const breakEvenPrice =
+      const breakEvenSupplyPrice =
         denominator <= 0 ? Number.POSITIVE_INFINITY : totalVariableCost / denominator
+      const breakEvenPrice =
+        options.vatMode === 'included' ? breakEvenSupplyPrice * (1 + VAT_RATE) : breakEvenSupplyPrice
       const marginRate = product.grossSales === 0 ? 0 : (product.netProfit / product.grossSales) * 100
+      const adCostRate = product.grossSales === 0 ? 0 : (product.adCost / product.grossSales) * 100
       const averageUnitPrice = product.quantity === 0 ? 0 : product.unitRevenue / product.quantity
       const risk = classifyRisk({
         netProfit: product.netProfit,
@@ -271,6 +325,7 @@ export function aggregateProducts(rows: OrderRow[]): ProductMetrics[] {
         netProfit: roundKRW(product.netProfit),
         marginRate: roundRate(marginRate),
         breakEvenPrice: roundKRW(breakEvenPrice),
+        adCostRate: roundRate(adCostRate),
         riskLevel: risk.riskLevel,
         riskReasons: risk.riskReasons,
       }
@@ -281,8 +336,8 @@ export function aggregateProducts(rows: OrderRow[]): ProductMetrics[] {
     })
 }
 
-export function aggregateDashboard(rows: OrderRow[]): DashboardData {
-  const products = aggregateProducts(rows)
+export function aggregateDashboard(rows: OrderRow[], options: CalculationOptions = {}): DashboardData {
+  const products = aggregateProducts(rows, options)
   const totalRevenue = products.reduce((sum, product) => sum + product.grossSales, 0)
   const totalProfit = products.reduce((sum, product) => sum + product.netProfit, 0)
   const averageMarginRate = totalRevenue === 0 ? 0 : (totalProfit / totalRevenue) * 100
@@ -303,7 +358,7 @@ export function aggregateDashboard(rows: OrderRow[]): DashboardData {
   }
 
   for (const row of rows) {
-    const metrics = calculateOrderMetrics(row)
+    const metrics = calculateOrderMetrics(row, options)
     const current = dailyMap.get(row.orderDate) ?? {
       orderDate: row.orderDate,
       grossSales: 0,
@@ -335,6 +390,10 @@ export function aggregateDashboard(rows: OrderRow[]): DashboardData {
         netProfit: roundKRW(item.netProfit),
       }))
       .sort((a, b) => a.orderDate.localeCompare(b.orderDate)),
+    priorityProducts: products
+      .filter((product) => product.riskLevel !== 'low')
+      .sort((a, b) => a.marginRate - b.marginRate || b.adCostRate - a.adCostRate)
+      .slice(0, 5),
   }
 }
 

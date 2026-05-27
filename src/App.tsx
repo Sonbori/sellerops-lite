@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Papa from 'papaparse'
 import {
   AlertTriangle,
+  Bot,
   CheckCircle2,
   Download,
   FileSpreadsheet,
@@ -32,9 +33,11 @@ import {
   parseCsvRows,
   REQUIRED_COLUMNS,
 } from './lib/sellerops'
-import type { ProductMetrics, RiskLevel, ValidationIssue } from './lib/sellerops'
+import type { ProductMetrics, RiskLevel, ValidationIssue, VatMode } from './lib/sellerops'
+import { createAiSummaryPayload } from './lib/aiSummary'
 
 type RiskFilter = 'all' | RiskLevel
+type AiStatus = 'idle' | 'loading' | 'done' | 'error'
 
 function issueSummary(issues: ValidationIssue[]) {
   if (issues.length === 0) {
@@ -77,6 +80,9 @@ function App() {
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('all')
+  const [vatMode, setVatMode] = useState<VatMode>('ignored')
+  const [aiStatus, setAiStatus] = useState<AiStatus>('idle')
+  const [aiSummary, setAiSummary] = useState('')
 
   const loadSampleCsv = async () => {
     const response = await fetch('/sample-orders.csv')
@@ -108,8 +114,13 @@ function App() {
       return null
     }
 
-    return aggregateDashboard(parseResult.validRows)
-  }, [parseResult])
+    return aggregateDashboard(parseResult.validRows, { vatMode })
+  }, [parseResult, vatMode])
+
+  useEffect(() => {
+    setAiStatus('idle')
+    setAiSummary('')
+  }, [csvText, vatMode])
 
   const categories = useMemo(() => {
     if (!dashboard) {
@@ -206,6 +217,34 @@ function App() {
     setCsvText(await file.text())
   }
 
+  const requestAiSummary = async () => {
+    if (!dashboard) {
+      return
+    }
+
+    setAiStatus('loading')
+    setAiSummary('')
+
+    try {
+      const response = await fetch('/api/summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(createAiSummaryPayload(dashboard)),
+      })
+      const data = (await response.json()) as { summary?: string; error?: string }
+
+      if (!response.ok || !data.summary) {
+        throw new Error(data.error ?? 'AI 요약을 생성하지 못했습니다.')
+      }
+
+      setAiSummary(data.summary)
+      setAiStatus('done')
+    } catch (error) {
+      setAiSummary(error instanceof Error ? error.message : 'AI 요약을 생성하지 못했습니다.')
+      setAiStatus('error')
+    }
+  }
+
   return (
     <main className="min-h-screen overflow-x-hidden bg-slate-100 text-slate-900">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
@@ -218,14 +257,14 @@ function App() {
               주문 CSV 수익성 대시보드
             </h1>
             <p className="mt-3 max-w-[330px] text-sm leading-6 text-slate-600 [word-break:keep-all] sm:max-w-3xl sm:text-base">
-              상품별 수익성과 위험도를 브라우저에서 계산합니다. AI 요약은 2차 범위입니다.
+              상품별 수익성과 위험도를 브라우저에서 계산하고, 계산된 요약만 AI 리포트로 해석합니다.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex max-w-full flex-wrap gap-2">
             <button
               type="button"
               onClick={() => void loadSampleCsv()}
-              className="inline-flex w-fit items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800"
+              className="inline-flex w-fit max-w-full items-center gap-2 rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800"
             >
               <FileSpreadsheet className="h-4 w-4" />
               샘플 데이터 보기
@@ -233,7 +272,7 @@ function App() {
             <a
               href="/sample-orders.csv"
               download
-              className="inline-flex w-fit items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-slate-400"
+              className="inline-flex w-fit max-w-full items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-slate-400"
             >
               <Download className="h-4 w-4" />
               샘플 CSV 다운로드
@@ -252,6 +291,37 @@ function App() {
                 <p className="text-sm text-slate-500">원본 CSV는 브라우저 안에서만 처리합니다.</p>
               </div>
             </div>
+
+            <fieldset className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <legend className="px-1 text-xs font-semibold text-slate-500">부가세 계산 방식</legend>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {[
+                  ['ignored', '입력값 그대로', '단순 수익성 확인'],
+                  ['included', 'VAT 포함 입력', '매출·원가 공급가 환산'],
+                ].map(([value, label, helper]) => (
+                  <label
+                    key={value}
+                    className={clsx(
+                      'cursor-pointer rounded-md border px-3 py-2 text-sm transition',
+                      vatMode === value
+                        ? 'border-emerald-600 bg-white text-slate-950 shadow-sm'
+                        : 'border-slate-200 bg-transparent text-slate-600',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="vatMode"
+                      value={value}
+                      checked={vatMode === value}
+                      onChange={(event) => setVatMode(event.target.value as VatMode)}
+                      className="sr-only"
+                    />
+                    <span className="block font-semibold">{label}</span>
+                    <span className="mt-0.5 block text-xs text-slate-500">{helper}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
 
             <label
               htmlFor="csv-upload"
@@ -333,6 +403,66 @@ function App() {
                   <p className="mt-2 text-2xl font-bold text-slate-950">{value}</p>
                 </div>
               ))}
+            </section>
+
+            <section className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="font-semibold text-slate-950">개선 우선순위 Top 5</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    마진율, 손익분기 위험, 광고비 비중, 재고 기준으로 먼저 볼 상품입니다.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRiskFilter('high')}
+                  className="w-fit rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 transition hover:border-slate-400"
+                >
+                  위험 상품만 보기
+                </button>
+              </div>
+              <div className="mt-4 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                {dashboard.priorityProducts.length ? (
+                  dashboard.priorityProducts.map((product, index) => (
+                    <article
+                      key={`${product.productName}-${product.category}`}
+                      className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 p-4"
+                    >
+                      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <span className="text-xs font-bold text-emerald-700">#{index + 1}</span>
+                        <RiskBadge risk={product.riskLevel} />
+                      </div>
+                      <h3 className="mt-3 text-sm font-semibold leading-5 text-slate-950 [overflow-wrap:anywhere]">
+                        {product.productName}
+                      </h3>
+                      <p className="mt-1 text-xs text-slate-500">{product.category}</p>
+                      <dl className="mt-3 space-y-1 text-xs text-slate-600">
+                        <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-2">
+                          <dt>마진율</dt>
+                          <dd className="shrink-0 font-semibold text-slate-950">
+                            {formatPercent(product.marginRate)}
+                          </dd>
+                        </div>
+                        <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-2">
+                          <dt>광고비</dt>
+                          <dd className="shrink-0">{formatPercent(product.adCostRate)}</dd>
+                        </div>
+                        <div className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-2">
+                          <dt>재고</dt>
+                          <dd className="shrink-0">{formatNumber(product.stock)}개</dd>
+                        </div>
+                      </dl>
+                      <p className="mt-3 text-xs leading-5 text-slate-500 [word-break:keep-all]">
+                        {product.riskReasons.join(', ')}
+                      </p>
+                    </article>
+                  ))
+                ) : (
+                  <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 lg:col-span-5">
+                    현재 데이터에서는 높은 우선순위 위험 상품이 없습니다.
+                  </p>
+                )}
+              </div>
             </section>
 
             <section className="grid gap-4 xl:grid-cols-2">
@@ -461,12 +591,44 @@ function App() {
             </section>
 
             <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="font-semibold text-slate-950">AI Summary는 2차 범위</h2>
-                  <p className="mt-2 text-sm leading-6 text-slate-600 [word-break:keep-all]">
-                이 MVP에서는 계산과 검증만 제공합니다. 다음 단계에서 원본 CSV가 아니라 총매출,
-                총순이익, 평균 마진율, 위험 상품 목록처럼 계산된 summary만 OpenAI API로
-                전달해 운영 리포트를 생성합니다.
-              </p>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 className="flex items-center gap-2 font-semibold text-slate-950">
+                    <Bot className="h-5 w-5 text-emerald-700" />
+                    AI 운영 요약
+                  </h2>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 [word-break:keep-all]">
+                    원본 CSV는 보내지 않고 총매출, 순이익, 평균 마진율, 위험 상품 Top 5처럼
+                    계산된 요약 데이터만 서버 API로 전송합니다.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void requestAiSummary()}
+                  disabled={aiStatus === 'loading'}
+                  className="inline-flex w-fit items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  <Bot className="h-4 w-4" />
+                  {aiStatus === 'loading' ? '요약 생성 중' : 'AI 요약 생성'}
+                </button>
+              </div>
+              {aiSummary ? (
+                <div
+                  className={clsx(
+                    'mt-4 whitespace-pre-wrap rounded-lg border p-4 text-sm leading-6',
+                    aiStatus === 'error'
+                      ? 'border-amber-200 bg-amber-50 text-amber-900'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-950',
+                  )}
+                >
+                  {aiSummary}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+                  API key가 설정되지 않은 로컬 Vite 서버에서는 안내 메시지가 표시됩니다. Vercel 배포
+                  환경에서는 `OPENAI_API_KEY`를 서버 환경변수로 설정하세요.
+                </div>
+              )}
             </section>
           </>
         )}

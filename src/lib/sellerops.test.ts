@@ -46,7 +46,17 @@ describe('sellerops calculations', () => {
       netProfit: 5000,
       marginRate: 8.333333333333332,
       breakEvenPrice: 27222.222222222223,
+      adCostRate: 13.333333333333334,
     })
+  })
+
+  it('can calculate profit from VAT-included sales and product cost inputs', () => {
+    const metrics = calculateOrderMetrics(rows[0], { vatMode: 'included' })
+
+    expect(metrics.grossSales).toBe(60000)
+    expect(Math.round(metrics.totalProductCost)).toBe(32727)
+    expect(Math.round(metrics.netProfit)).toBe(2818)
+    expect(Math.round(metrics.breakEvenPrice)).toBe(27944)
   })
 
   it('aggregates product rows and classifies risk', () => {
@@ -85,6 +95,7 @@ describe('sellerops calculations', () => {
     expect(dashboard.dailyTrend).toEqual([
       { orderDate: '2026-05-01', grossSales: 96000, netProfit: 19120 },
     ])
+    expect(dashboard.priorityProducts[0].productName).toBe('무선 키보드')
   })
 
   it('validates missing columns and invalid row values', () => {
@@ -124,5 +135,45 @@ describe('sellerops calculations', () => {
 
     expect(invalidResult.validRows).toHaveLength(0)
     expect(invalidResult.issues.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('normalizes common CSV number formats before validation', () => {
+    const result = parseCsvRows(
+      [
+        {
+          orderDate: '2026-05-01',
+          productName: '무선 키보드',
+          category: '디지털',
+          quantity: '2',
+          unitPrice: '30,000원',
+          productCost: '18,000',
+          platformFeeRate: '10%',
+          shippingFee: '3,000',
+          adCost: '8,000',
+          discount: '2,000',
+          stock: '4',
+        },
+      ],
+      [
+        '\uFEFForderDate',
+        'productName',
+        'category',
+        'quantity',
+        'unitPrice',
+        'productCost',
+        'platformFeeRate',
+        'shippingFee',
+        'adCost',
+        'discount',
+        'stock',
+      ],
+    )
+
+    expect(result.issues).toHaveLength(0)
+    expect(result.validRows[0]).toMatchObject({
+      unitPrice: 30000,
+      productCost: 18000,
+      platformFeeRate: 10,
+    })
   })
 })
